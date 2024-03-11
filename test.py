@@ -23,5 +23,5 @@ def on_message(client, userdata, msg):
 client.on_connect = on_connect
 client.on_message = on_message
 
-client.connect("node-red.cqu.edu.au", 8883)
+client.connect("cqu-iot.ovangle.com", 1884)
 client.loop_forever()

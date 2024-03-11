@@ -1,0 +1,21 @@
+
+[tool.poetry]
+name = "robot_arm"
+version = "0.1.0"
+description = "Connect the elephant robotics mechArms to the cqu iot network"
+authors = ["Thomas Stephenson <ovangle@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+pymycobot = "^3.4.0"
+paho-mqtt = "^2.0.0"
+asyncio-mqtt = "^0.16.2"
+pydantic-settings = "^2.2.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+package-mode = false
