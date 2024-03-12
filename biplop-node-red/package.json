@@ -1,0 +1,13 @@
+{
+    "name": "node-red-project",
+    "description": "A Node-RED Project",
+    "version": "0.0.1",
+    "private": true,
+    "dependencies": {
+        "node-red-contrib-browser-utils": "~0.0.11",
+        "node-red-contrib-cloudantplus": "~2.0.5",
+        "node-red-contrib-mqtt-broker": "~0.2.9",
+        "node-red-contrib-play-audio": "~2.5.0",
+        "node-red-node-watson": "~0.10.3"
+    }
+}

@@ -1,6 +1,6 @@
 
 [tool.poetry]
-name = "robot_arm"
+name = "mech_arm_mqtt"
 version = "0.1.0"
 description = "Connect the elephant robotics mechArms to the cqu iot network"
 authors = ["Thomas Stephenson <ovangle@gmail.com>"]
@@ -13,6 +13,7 @@ pymycobot = "^3.4.0"
 paho-mqtt = "^2.0.0"
 asyncio-mqtt = "^0.16.2"
 pydantic-settings = "^2.2.1"
+click = "^8.1.7"
 
 
 [build-system]
