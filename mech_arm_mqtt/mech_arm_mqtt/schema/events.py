@@ -22,7 +22,7 @@ _ALL_EVENT_TYPES: dict[str, type] = {}
 _ERROR_EVENT_TYPES: dict[str, type] = {}
 
 
-def action_from_json_object(json: dict[str, Any]) -> MechArmEvent:
+def event_from_json_object(json: dict[str, Any]) -> MechArmEvent:
     try:
         evt_name = json["name"]
     except KeyError:

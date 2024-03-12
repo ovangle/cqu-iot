@@ -1,31 +1,28 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import AsyncIterable, TypeVar
+from typing import AsyncIterable, TypeVar, cast
 from asyncio import Future
 import asyncio
 import dataclasses
 import json
 from typing import Callable
 from paho.mqtt.client import MQTTv311, CallbackAPIVersion
-from asyncio_mqtt import Client as MQTTClient
+from asyncio_mqtt import Client as MQTTClient, ProtocolVersion
 
-from mech_arm_mqtt.schema.actions import BeginSession, MechArmAction, MoveAction
+from mech_arm_mqtt.schema.actions import BeginSession, MechArmAction, MoveAction, SessionAction, action_to_json_object
 from mech_arm_mqtt.schema.events import (
     ActionResponse,
     Busy,
-    BadAction,
-    InvalidActionError,
-    MechArmBusyError,
     MechArmEvent,
+    MoveComplete,
     SessionCreated,
     SessionExit,
     SessionReady,
     SessionTimeout,
-    action_to_json_object,
-    event_to_json_object,
+    event_from_json_object
 )
-from mech_arm_mqtt.schema.protocol import MechArmClient
+from mech_arm_mqtt.schema.protocol import MechArmClient, MechArmSession
 
 
 class MyCobotRemoteClient(MQTTClient, MechArmClient['MyCobotRemoteSession']):
@@ -43,10 +40,11 @@ class MyCobotRemoteClient(MQTTClient, MechArmClient['MyCobotRemoteSession']):
             hostname=hostname,
             port=port,
             client_id=client_id,
-            protocol=MQTTv311,
+            protocol=ProtocolVersion.V311,
             username=username,
             password=password
         )
+        self.client_id = client_id
         self.application_id = application_id
         self.device_id = device_id
 
@@ -55,13 +53,13 @@ class MyCobotRemoteClient(MQTTClient, MechArmClient['MyCobotRemoteSession']):
             async for message in messages:
                 if message.topic != topic:
                     continue
+                if not isinstance(message.payload, (str, bytes)):
+                    raise RuntimeError('Message payload must be str or bytes')
                 try:
                     message_object = json.loads(message.payload)
-                    event = event_to_json_object(message_object)
+                    event = event_from_json_object(message_object)
                 except ValueError as e:
                     raise e
-                if event.mecharm_client_id != self.mecharm_client_id:
-                    continue
                 yield event
 
     TAction = TypeVar('TAction', bound=MechArmAction)
@@ -80,10 +78,11 @@ class MyCobotRemoteClient(MQTTClient, MechArmClient['MyCobotRemoteSession']):
             if (
                 isinstance(event, ActionResponse)
                 and event.action.name == action.name
-                and event.action.action_id == action.id
+                and event.action.action_id == action.action_id
             ):
-                if is_final_response(action):
-                    return action
+                if is_final_response(event):
+                    return event
+        raise RuntimeError("Topic ended without receiving response for action")
 
     @property
     def mecharm_broadcast_topic(self) -> str:
@@ -107,7 +106,12 @@ class MyCobotRemoteClient(MQTTClient, MechArmClient['MyCobotRemoteSession']):
         )
         return self._topic_events(self.mecharm_begin_session_topic)
 
-    async def begin_session(self, begin_session: BeginSession) -> MyCobotRemoteSession:
+    async def begin_session(self, begin_session: BeginSession | None = None) -> MyCobotRemoteSession:
+        if not begin_session:
+            begin_session = BeginSession(
+                controller_client_id=self.client_id,
+                mecharm_application_id=self.application_id,
+            )
         begin_session.controller_client_id = self.client_id
         begin_session_response = await self._dispatch_action(
             self.mecharm_begin_session_topic,
@@ -117,7 +121,8 @@ class MyCobotRemoteClient(MQTTClient, MechArmClient['MyCobotRemoteSession']):
         if isinstance(begin_session_response, SessionCreated):
             return MyCobotRemoteSession(
                 self,
-                begin_session.mecharm_application_id
+                self.application_id,
+                begin_session_response.session.session_id
             )
         else:
             raise RuntimeError(f"{begin_session_response}")
@@ -125,12 +130,25 @@ class MyCobotRemoteClient(MQTTClient, MechArmClient['MyCobotRemoteSession']):
     def mecharm_session_topic(self, session_id: int):
         return f"application/{self.application_id}/device/{self.device_id}/session/{session_id}"
 
-    async def session_events(self, session_id: int, qos: int = 0) -> AsyncIterable[MechArmEvent]:
+    async def session_events(self, session_id: int) -> AsyncIterable[MechArmEvent]:
         session_topic = self.mecharm_session_topic(session_id)
-        return await self._topic_events(session_topic)
+        return self._topic_events(session_topic)
+
+    async def subscribe_session_events(self, session_id: int):
+        return await self.subscribe(self.mecharm_session_topic(session_id))
+
+    async def unsubscribe_session_events(self, session_id: int):
+        return await self.unsubscribe(self.mecharm_session_topic(session_id))
+
+    async def dispatch_session_action(self, session_id: int, action: SessionAction):
+        await self._dispatch_action(
+            self.mecharm_session_topic(session_id),
+            action,
+            lambda evt: isinstance(evt, SessionAction)
+        )
 
 
-class MyCobotRemoteSession:
+class MyCobotRemoteSession(MechArmSession):
     def __init__(
         self,
         client: MyCobotRemoteClient,
@@ -142,45 +160,18 @@ class MyCobotRemoteSession:
         self.session_id = session_id
         self.is_closed = False
 
-    @property
-    def session_events(self) -> AsyncIterable[MechArmEvent]:
-        return self.client.session_events(self.session_id)
+    async def session_events(self) -> AsyncIterable[MechArmEvent]:
+        return await self.client.session_events(self.session_id)
 
+    async def move(self, action: MoveAction) -> MoveComplete:
+        return await self.client.dispatch_session_action(self.session_id, action)
 
-    
-    def add_on_ready(self, session_ready: SessionReady) -> Callable[[], None]:
-        return self.client.add_event_handler("session_ready", session_ready)
+    async def exit(self):
+        raise NotImplementedError
 
-    _unsubscribe_on_timeout: Callable[[], None] | None
+    async def __aenter__(self):
+        await self.client.subscribe_session_events(self.session_id)
+        return self
 
-    def on_timeout(self, session_timeout: SessionTimeout):
-        """
-        A timeout event happens when an action declares that
-        the sesion should wait for the same controller to
-        execute another action, but the controller has issued
-        no further requests
-        """
-        if session_timeout.session_id == self.session_id:
-            print(f"session timed out {session_timeout}")
-            self.destroy()
-
-    _unsubscribe_on_exit: Callable[[], None] | None
-
-    def on_exit(self, session_exit: SessionExit):
-        if session_exit.session_id == self.session_id:
-            print(f"session exited successfully {sesesion_exit}")
-            self.destroy()
-
-    def init(self):
-        self._unsubscribe_on_timeout = self.client.add_event_handler(
-            "session_timeout", lambda session_timeout: self.on_timeout(session_timeout)
-        )
-        self._unsubscribe_on_exit = self.client.client.add_event_handler(
-            "session_exit", lambda session_exit: self.on_exit(session_exit)
-        )
-
-    def destroy(self):
-        if self._unsubscribe_on_timeout:
-            self._unsubscribe_on_timeout()
-        if self._unsubscribe_on_exit:
-            self._unsubscribe_on_exit()
+    async def __aexit__(self):
+        await self.client.unsubscribe_session_events(self.session_id)

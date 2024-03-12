@@ -6,7 +6,7 @@ from typing import AsyncContextManager, Protocol, TypeVar
 from .actions import MoveAction, BeginSession
 from .events import MoveComplete, SessionExit
 
-class MechArmSession(Protocol):
+class MechArmSession(Protocol, AsyncContextManager[MechArmSession]):
     @abstractmethod
     async def move(self, action: MoveAction) -> MoveComplete:
         pass
@@ -23,5 +23,5 @@ class MechArmClient(Protocol[TSession]):
         ...
 
     @abstractmethod
-    async def begin_session(self, session: BeginSession) -> AsyncContextManager[TSession]:
+    async def begin_session(self, session: BeginSession | None = None) -> TSession:
         ...

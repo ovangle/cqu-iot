@@ -72,8 +72,10 @@ class AsyncMyCobot(MechArmSession):
         self, move_action: MoveAction
     ) -> MoveComplete:
         future = self._loop.create_future()
-        def on_move_complete(complete: MoveComplete): 
+        def on_move_complete(complete: ActionResponse[MoveAction]): 
+            assert isinstance(complete, MoveComplete)
             future.set_result(complete)
+            return None
 
         await self._task_queue.put(MoveTask(move_action, on_move_complete))
         return await future
