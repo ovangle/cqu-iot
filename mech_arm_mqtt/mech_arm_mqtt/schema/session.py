@@ -1,53 +1,57 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
+import asyncio
 from typing import (
     Any,
     AsyncContextManager,
+    AsyncGenerator,
     AsyncIterable,
+    AsyncIterator,
     Awaitable,
     Callable,
     Protocol,
     Self,
+    TypeVar,
 )
 
 
-from .model import MechArmAction, MechArmEvent, MechArmSessionInfo
+from .model import ActionResponse, MechArmAction, MechArmEvent, MechArmSessionInfo, SessionAction, SessionEvent
 
-from .actions import MoveAction, SessionCreated
+from .actions import ExitSession, MoveAction
 from .events import (
     ActionReceived,
     MechArmStatus,
     MoveComplete,
     MoveError,
     MoveProgress,
+    SessionCreated,
     SessionDestroyed,
-    SessionExit,
     SessionReady,
 )
 
 
 class MechArm(ABC):
     @abstractmethod
-    async def events(self) -> AsyncIterable[MechArmEvent]:
+    def events(self) -> AsyncIterable[MechArmEvent]:
         # All broadcast events of the mech arm
         raise NotImplementedError()
 
-    async def status_events(self) -> AsyncIterable[MechArmStatus]:
+    async def status_events(self) -> AsyncIterator[MechArmStatus]:
         async for event in self.events():
             if isinstance(event, MechArmStatus):
                 yield event
 
-    async def action_received_events(self) -> AsyncIterable[ActionReceived]:
+    async def action_received_events(self) -> AsyncIterator[ActionReceived]:
         async for event in self.events():
             if isinstance(event, ActionReceived):
                 yield event
 
-    async def session_created_events(self) -> AsyncIterable[SessionCreated]:
+    async def session_created_events(self) -> AsyncIterator[SessionCreated]:
         async for event in self.events():
             if isinstance(event, SessionCreated):
                 yield event
 
-    async def session_destroyed_events(self) -> AsyncIterable[SessionDestroyed]:
+    async def session_destroyed_events(self) -> AsyncIterator[SessionDestroyed]:
         async for event in self.events():
             if isinstance(event, SessionDestroyed):
                 yield event
@@ -59,18 +63,37 @@ class MechArm(ABC):
 
 class MechArmSession(ABC):
     session_id: int
+    client_id: str
+    remote_client_id: str
+
+    action_queue: asyncio.Queue[SessionAction]
 
     @abstractmethod
     def events(self) -> AsyncIterable[MechArmEvent]:
         raise NotImplementedError
 
-    async def await_exit(self) -> SessionExit:
+    TAction = TypeVar('TAction', bound=MechArmAction)
+
+    @abstractmethod
+    def on_action(self, action: TAction) -> Awaitable[ActionResponse[TAction]]:
+        ...
+
+
+    @property
+    def info(self) -> MechArmSessionInfo:
+        return MechArmSessionInfo(
+            id=self.session_id,
+            client_id=self.client_id,
+            remote_client_id=self.remote_client_id
+        )
+
+    async def await_exit(self) -> SessionDestroyed:
         async for event in self.events():
-            if isinstance(event, SessionExit) and event.session.id == self.session_id:
+            if isinstance(event, SessionDestroyed) and event.session.id == self.session_id:
                 return event
         raise RuntimeError("Session did not exit gracefully")
 
-    async def session_ready_events(self) -> AsyncIterable[SessionReady]:
+    async def session_ready_events(self) -> AsyncIterator[SessionReady]:
         """
         The session will emit a session ready event every time the
         arm is ready to receive new instructions
@@ -84,13 +107,11 @@ class MechArmSession(ABC):
         Await the next session ready event, or None if the session exits
         before the next ready event
         """
-        async for event in self.session_ready_events():
-            return event
-        raise RuntimeError("Session did not exit gracefully")
+        return await anext(self.session_ready_events(), None)
 
     async def move_completed_events(
         self, action: MoveAction | None = None
-    ) -> AsyncIterable[MoveComplete]:
+    ) -> AsyncIterator[MoveComplete]:
         async for event in self.events():
             if not (
                 isinstance(event, MoveComplete) and event.session.id == self.session_id
@@ -102,23 +123,29 @@ class MechArmSession(ABC):
 
             yield event
 
+            if action and action.is_complete:
+                return
+
     async def move_progress_events(
         self, action: MoveAction | None = None
-    ) -> AsyncIterable[MoveProgress]:
+    ) -> AsyncIterator[MoveProgress]:
         async for event in self.events():
-            if not (isinstance(event, MoveProgress) and event.session.id == self.id):
+            if not (isinstance(event, MoveProgress) and event.session.id == self.session_id):
                 continue
 
             if action and event.action.id != action.id:
                 continue
 
             yield event
+
+            if action and action.is_complete:
+                return
 
     async def move_error_events(
         self, action: MoveAction | None = None
-    ) -> AsyncIterable[MoveError]:
+    ) -> AsyncIterator[MoveError]:
         async for event in self.events():
-            if not (isinstance(event, MoveError) and event.session.id == self.id):
+            if not (isinstance(event, MoveError) and event.session.id == self.session_id):
                 continue
 
             if action and event.action.id != action.id:
@@ -126,14 +153,29 @@ class MechArmSession(ABC):
 
             yield event
 
-    @abstractmethod
+            if action and action.is_complete:
+                return
+
     async def move(
         self,
         action: MoveAction,
         on_progress: Callable[[MoveProgress], None] | None = None,
     ) -> MoveComplete:
-        raise NotImplementedError
+        if on_progress:
+            async def emit_on_progress():
+                async for progress_event in self.move_progress_events(action):
+                    on_progress(progress_event)
+            loop = asyncio.get_running_loop()
+            loop.call_soon(emit_on_progress())
 
-    @abstractmethod
-    def exit(self, exit_code: int = 0) -> Awaitable[SessionExit]:
-        raise NotImplementedError
+        await self.action_queue.put(action)
+        move_complete = await anext(self.move_completed_events(action))
+
+        action.mark_complete()
+        return move_complete
+
+    async def exit(self, exit_code: int = 0) -> SessionDestroyed:
+        action = ExitSession(name="exit_session", session=self.info, exit_code=exit_code)
+        await self.action_queue.put(action)
+
+        return await self.await_exit()

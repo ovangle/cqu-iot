@@ -13,19 +13,10 @@ from typing import (
     TypeVar,
     dataclass_transform,
 )
-from mech_arm_mqtt.mech_arm_mqtt.async_mycobot import TActionProgress
 
-from mech_arm_mqtt.mech_arm_mqtt.schema.errors import MechArmError
-
-from .model import (
-    ActionProgress,
-    ActionResponse,
-    MechArmEvent,
-    MechArmSessionEvent,
-    MechArmSessionInfo,
-    mecharm_event,
-)
-from .actions import MechArmAction, BeginSession, MechArmAction, MoveAction
+from .model import ActionError, ActionProgress, ActionResponse, MechArmEvent, MechArmSessionInfo, SessionEvent, mecharm_event
+from .errors import MechArmError
+from .actions import ExitSession, MechArmAction, BeginSession, MechArmAction, MoveAction
 
 # event type registry by name
 _ALL_EVENT_TYPES: dict[str, type] = {}
@@ -70,25 +61,32 @@ class BadActionError(Exception):
         self.action = action
         self.message = message
 
-        super().__init__(self, f"Invalid {self.action.name} action: {msg}")
+        super().__init__(self, f"Bad '{self.action.name}' action: {message}")
 
     @property
     def event(self):
         return BadAction(action=self.action, message=self.message)
 
-
-class SessionBusyError(Exception):
-    def __init__(self, event: Busy):
-        self.event = event
-
-
-@mecharm_event("session_created")
-class SessionCreated(ActionResponse[BeginSession]):
+@mecharm_event("session_busy", error_code=MechArmError.SESSION_BUSY)
+class SessionBusy(ActionError[BeginSession]):
+    # The session which is currently using the mecharm
     session: MechArmSessionInfo
 
+class SessionBusyError(Exception):
+    def __init__(self, action: BeginSession, session: MechArmSessionInfo):
+        self.action = action
+        self.session = session
+        super().__init__(
+            f"begin_session: Already in use by '{session.remote_client_id}'"
+        )
 
+    @property
+    def event(self):
+        return SessionBusy(action=self.action, session=self.session)
+
+ 
 @mecharm_event("session_timeout")
-class SessionTimeout(ActionResponse[BeginSession]):
+class SessionTimeout(ActionError[BeginSession]):
     """
     Emitted when a session does not respond after
     the timeout specified in begin_session
@@ -98,8 +96,27 @@ class SessionTimeout(ActionResponse[BeginSession]):
     timeout: int
 
 
+class SessionTimeoutError(Exception):
+    def __init__(self, action: BeginSession, timeout: int):
+        self.action = action
+        self.timeout = timeout
+        super().__init__(f"Attempt to begin session timed out after {timeout} seconds")
+
+    @property
+    def event(self):
+        return SessionTimeout(
+            action=self.action,
+            timeout=self.timeout
+        )
+
+
+@mecharm_event("session_created")
+class SessionCreated(SessionEvent, ActionResponse[BeginSession]):
+    session: MechArmSessionInfo
+
+
 @mecharm_event("session_destroyed")
-class SessionDestroyed(MechArmEvent):
+class SessionDestroyed(SessionEvent, ActionResponse[ExitSession]):
     """
     A session has terminated
     """
@@ -108,17 +125,8 @@ class SessionDestroyed(MechArmEvent):
     exit_code: int
 
 
-@mecharm_event("session_exit")
-class SessionExit(MechArmSessionEvent):
-    """
-    The current session ended and the mechArm is awaiting connections
-    """
-
-    code: int
-
-
 @mecharm_event("session_ready")
-class SessionReady(MechArmSessionEvent):
+class SessionReady(SessionEvent):
     """
     Dispatched by the mechArm on the session topic to indicate
     that the mechArm is idle and ready to accept an action
@@ -128,18 +136,18 @@ class SessionReady(MechArmSessionEvent):
 
 
 @mecharm_event("move_progress")
-class MoveProgress(MechArmSessionEvent, ActionProgress[MoveAction]):
+class MoveProgress(SessionEvent, ActionProgress[MoveAction]):
     current_coords: tuple[int, int, int]
     dest_coords: tuple[int, int, int]
 
 
 @mecharm_event("move_complete")
-class MoveComplete(MechArmSessionEvent, ActionResponse[MoveAction]):
+class MoveComplete(SessionEvent, ActionResponse[MoveAction]):
     coords: tuple[int, int, int]
 
 
 @mecharm_event("move_error", error_code=MechArmError.MOVE_ERROR)
-class MoveError(MechArmSessionEvent, ActionResponse[MoveAction]):
+class MoveError(SessionEvent, ActionError[MoveAction]):
     """
     Some error has occured within the device
     """

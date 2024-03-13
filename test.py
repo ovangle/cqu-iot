@@ -1,5 +1,5 @@
 import os
-from paho.mqtt.client import Client, MQTTv311
+from paho.mqtt.client import Client, MQTTv311, CallbackAPIVersion
 
 try:
     CLIENT_USER=os.environ['MQTT_USER']
@@ -8,6 +8,7 @@ except KeyError as e:
     raise EnvironmentError(f'{e} not bound in environment')
 
 client = Client(
+    CallbackAPIVersion.VERSION2,
     client_id="",
     protocol=MQTTv311
 )
