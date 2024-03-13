@@ -3,14 +3,26 @@ from abc import ABC, abstractmethod
 import asyncio
 import contextlib
 import json
-from typing import TYPE_CHECKING, Any, AsyncContextManager, AsyncIterable, Awaitable, Callable, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncContextManager,
+    AsyncIterable,
+    Awaitable,
+    Callable,
+    TypeVar,
+)
 import dataclasses
 from typing import Generic
 from mech_arm_mqtt.schema.session import MechArm, MechArmSession
 from asyncio_mqtt import Client as MQTTClient, ProtocolVersion
 from mech_arm_mqtt.async_mycobot import AsyncMyCobot
 
-from mech_arm_mqtt.schema.model import ActionError, action_from_json_object, event_to_json_object
+from mech_arm_mqtt.schema.core import (
+    ActionErrorInfo,
+    action_from_json_object,
+    event_to_json_object,
+)
 from mech_arm_mqtt.schema.actions import (
     BeginSession,
     MechArmAction,
@@ -29,7 +41,7 @@ from mech_arm_mqtt.schema.events import (
     SessionEvent,
 )
 
-TEvent = TypeVar('TEvent', bound=MechArmEvent)
+TEvent = TypeVar("TEvent", bound=MechArmEvent)
 
 
 class MyCobotMQTTClient(MQTTClient, MechArm):
@@ -54,7 +66,7 @@ class MyCobotMQTTClient(MQTTClient, MechArm):
         async with self.messages() as messages:
             async for message in messages:
                 if not isinstance(message.payload, (str, bytes)):
-                    raise ValueError('Expected str or bytes payload')
+                    raise ValueError("Expected str or bytes payload")
                 try:
                     message_dict = json.loads(message.payload)
                     action = action_from_json_object(message_dict)
@@ -81,9 +93,12 @@ class MyCobotMQTTClient(MQTTClient, MechArm):
     async def subscribe_session_begin_action(self, qos: int = 0, timeout: int = 10):
         return await self.subscribe(self.session_begin_topic, qos=qos, timeout=timeout)
 
-    async def _emit_session_begin_response_event(self, event: ActionError[BeginSession]):
+    async def _emit_session_begin_response_event(
+        self, event: ActionErrorInfo[BeginSession]
+    ):
         await self.publish(
-            topic=self.session_begin_topic, payload=json.dumps(event_to_json_object(event))
+            topic=self.session_begin_topic,
+            payload=json.dumps(event_to_json_object(event)),
         )
         return event
 
@@ -110,7 +125,6 @@ class MyCobotMQTTClient(MQTTClient, MechArm):
                 if action.session_id == session_id:
                     yield action
 
-
     TSessionEvent = TypeVar("TSessionEvent", bound=SessionEvent)
 
     async def _emit_session_event(
@@ -123,9 +137,7 @@ class MyCobotMQTTClient(MQTTClient, MechArm):
         )
         return event
 
-    async def emit_move_complete(
-        self, session_id: int, event: MoveComplete
-    ):
+    async def emit_move_complete(self, session_id: int, event: MoveComplete):
         await self._emit_session_event(session_id, event)
 
     @property
@@ -148,14 +160,13 @@ class MyCobotMQTTClient(MQTTClient, MechArm):
             async def relay_notifications():
                 for event in self._current_session.events():
                     await self._event_queue.put(event)
+
             loop = asyncio.get_running_loop()
             loop.call_soon(relay_notifications())
 
             yield self._current_session
         finally:
             self._current_session = None
-            
-
 
 
 _NEXT_SESSION_ID = 0
@@ -167,20 +178,15 @@ def next_session_id():
     _NEXT_SESSION_ID += 1
     return session_id
 
+
 class MyCobotMQTTSession(MechArmSession):
-    def __init__(
-        self,
-        client: MyCobotMQTTClient,
-        begin_session: BeginSession
-    ):
+    def __init__(self, client: MyCobotMQTTClient, begin_session: BeginSession):
         self.client = client
         self._begin_session = begin_session
         self.session_id = next_session_id()
 
         self._mycobot = AsyncMyCobot(
-            self.session_id, 
-            begin_session,
-            client.cient_settings.MECHARM_PORT
+            self.session_id, begin_session, client.cient_settings.MECHARM_PORT
         )
 
     @property

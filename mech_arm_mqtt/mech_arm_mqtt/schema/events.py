@@ -11,11 +11,24 @@ from typing import (
     Literal,
     Protocol,
     TypeVar,
+    cast,
     dataclass_transform,
 )
 
-from .model import ActionError, ActionProgress, ActionResponse, MechArmEvent, MechArmSessionInfo, SessionEvent, mecharm_event
-from .errors import MechArmError
+from mech_arm_mqtt.schema.core import MechArmErrorCode
+
+from .core import (
+    ActionErrorInfo,
+    ActionProgress,
+    ActionResponse,
+    MechArmActionError,
+    MechArmError,
+    MechArmErrorInfo,
+    MechArmEvent,
+    SessionEvent,
+    MechArmSessionInfo,
+    mecharm_event,
+)
 from .actions import ExitSession, MechArmAction, BeginSession, MechArmAction, MoveAction
 
 # event type registry by name
@@ -46,8 +59,8 @@ class ActionReceived(MechArmEvent):
     action: MechArmAction
 
 
-@mecharm_event("bad_action", error_code=MechArmError.BAD_ACTION)
-class BadAction(MechArmEvent):
+@mecharm_event("bad_action", error_code=MechArmErrorCode.BAD_ACTION)
+class BadActionErrorInfo(MechArmErrorInfo):
     """
     The received action was unparesable as a schema action
     """
@@ -56,37 +69,46 @@ class BadAction(MechArmEvent):
     message: str
 
 
-class BadActionError(Exception):
+class BadActionError(MechArmError):
     def __init__(self, action: MechArmAction, message: str):
         self.action = action
         self.message = message
 
-        super().__init__(self, f"Bad '{self.action.name}' action: {message}")
+        super().__init__(self, f"Invalid {self.action.name} action: {msg}")
 
     @property
-    def event(self):
-        return BadAction(action=self.action, message=self.message)
+    def as_event(self):
+        return BadActionErrorInfo(action=self.action, message=self.message)
 
-@mecharm_event("session_busy", error_code=MechArmError.SESSION_BUSY)
-class SessionBusy(ActionError[BeginSession]):
-    # The session which is currently using the mecharm
-    session: MechArmSessionInfo
 
-class SessionBusyError(Exception):
-    def __init__(self, action: BeginSession, session: MechArmSessionInfo):
-        self.action = action
-        self.session = session
+@mecharm_event("session_busy")
+class SessionBusyInfo(ActionErrorInfo[BeginSession]):
+    current_controller_id: str
+
+
+class SessionBusy(MechArmActionError):
+    def __init__(self, action: BeginSession, current_controller_id):
         super().__init__(
-            f"begin_session: Already in use by '{session.remote_client_id}'"
+            MechArmErrorCode.SESSION_BUSY,
+            action,
+            message="session busy",
+        )
+        self.current_controller_id = current_controller_id
+
+    def as_event(self) -> MechArmEvent:
+        return SessionBusyInfo(
+            action=cast(BeginSession, self.action),
+            current_controller_id=self.current_controller_id,
         )
 
-    @property
-    def event(self):
-        return SessionBusy(action=self.action, session=self.session)
 
- 
+@mecharm_event("session_created")
+class SessionCreated(ActionResponse[BeginSession]):
+    session: MechArmSessionInfo
+
+
 @mecharm_event("session_timeout")
-class SessionTimeout(ActionError[BeginSession]):
+class SessionTimeout(MechArmErrorInfo):
     """
     Emitted when a session does not respond after
     the timeout specified in begin_session
@@ -95,28 +117,19 @@ class SessionTimeout(ActionError[BeginSession]):
     session: MechArmSessionInfo
     timeout: int
 
+class SessionTimeoutError(MechArmActionError):
+    def __init__(
+            self,
+            action: BeginSession,
 
-class SessionTimeoutError(Exception):
-    def __init__(self, action: BeginSession, timeout: int):
-        self.action = action
-        self.timeout = timeout
-        super().__init__(f"Attempt to begin session timed out after {timeout} seconds")
+    )
 
-    @property
-    def event(self):
-        return SessionTimeout(
-            action=self.action,
-            timeout=self.timeout
-        )
+    def as_event(self):
 
-
-@mecharm_event("session_created")
-class SessionCreated(SessionEvent, ActionResponse[BeginSession]):
-    session: MechArmSessionInfo
 
 
 @mecharm_event("session_destroyed")
-class SessionDestroyed(SessionEvent, ActionResponse[ExitSession]):
+class SessionDestroyed(ActionResponse[ExitSession]):
     """
     A session has terminated
     """
@@ -147,7 +160,7 @@ class MoveComplete(SessionEvent, ActionResponse[MoveAction]):
 
 
 @mecharm_event("move_error", error_code=MechArmError.MOVE_ERROR)
-class MoveError(SessionEvent, ActionError[MoveAction]):
+class MoveError(MechArmSessionEvent, ActionResponse[MoveAction]):
     """
     Some error has occured within the device
     """

@@ -1,12 +1,30 @@
+from __future__ import annotations
+from abc import abstractmethod
 import dataclasses
+from enum import IntEnum
 from typing import Any, ClassVar, Generic, TypeVar, dataclass_transform
 
 
 @dataclasses.dataclass(kw_only=True)
-class MechArmSessionInfo:
-    id: int
+class MechArmInfo:
     client_id: str
+
+
+@dataclasses.dataclass(kw_only=True)
+class MechArmSessionInfo(MechArmInfo):
+    """
+    A session represents a unique lease by a remote
+    to exclusively control the current client.
+    """
+
+    id: int
     remote_client_id: str
+
+
+class MechArmErrorCode(IntEnum):
+    BAD_ACTION = 300
+    SESSION_BUSY = 400
+    MOVE_ERROR = 500
 
 
 _NEXT_ACTION_ID = 0
@@ -25,18 +43,22 @@ class MechArmAction:
     Actions represent a commands which can be passed to a mechArm
     in order to generate responses
     """
+
     __action_name__: ClassVar[str]
 
-    name: str = ''
+    @property
+    def name(self):
+        return type(self).__action_name__
+
     id: int = dataclasses.field(default_factory=next_action_id)
-    session: MechArmSessionInfo | None = None
+    mech_arm: MechArmInfo
 
     is_complete: bool = False
     is_error: bool = False
     error_code: int | None = None
 
     def __post_init__(self, **kwargs):
-        object.__setattr__(self, 'name', type(self).__action_name__)
+        object.__setattr__(self, "name", type(self).__action_name__)
 
     def mark_complete(self, error_code: int | None = None):
         self.is_complete = True
@@ -65,10 +87,11 @@ def action_to_json_object(action: MechArmAction):
 
 _ALL_ACTION_TYPES: dict[str, type[MechArmAction]] = {}
 
+
 @dataclass_transform(kw_only_default=True)
 def mecharm_action(name: str):
     def decorator(cls: type[MechArmAction]) -> type[MechArmAction]:
-        setattr(cls, '__action_name__', name)
+        setattr(cls, "__action_name__", name)
         return dataclasses.dataclass(kw_only=True)(cls)
 
     return decorator
@@ -76,7 +99,7 @@ def mecharm_action(name: str):
 
 @dataclasses.dataclass(kw_only=True)
 class SessionAction(MechArmAction):
-    pass
+    session: MechArmSessionInfo
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -84,28 +107,24 @@ class MechArmEvent:
     """
     Represents a message sent by a mecharm to interested subscribers
     """
+
     __event_name__: ClassVar[str]
-    __event_error_code__: ClassVar[int | None]
+    __event_error_code__: ClassVar[MechArmErrorCode | None]
 
-    name: str 
-    error_code: int | None = None
+    @property
+    def name(self):
+        return type(self).__event_name__
 
-    # The source action, if there is one
-    action: MechArmAction | None = None
-
-    session: MechArmSessionInfo | None = None
-
-    def __post_init__(self):
-        setattr(self, 'name', self.__name__)
-        setattr(self, 'error_code', self.__error_code__)
-
+    @property
+    def error_code(self) -> MechArmErrorCode | None:
+        return type(self).__event_error_code__
 
 
 _ALL_EVENT_TYPES: dict[str, type[MechArmEvent]]
 
 
 @dataclass_transform(kw_only_default=True)
-def mecharm_event(name: str, *, error_code: int | None = None):
+def mecharm_event(name: str, *, error_code: MechArmErrorCode | None = None):
     def decorator(cls: type[MechArmEvent]):
         _ALL_EVENT_TYPES[name] = cls
         object.__setattr__(cls, "__event_name__", name)
@@ -136,31 +155,52 @@ def event_to_json_object(evt: MechArmEvent) -> dict[str, Any]:
 
 
 @dataclasses.dataclass(kw_only=True)
-class ErrorEvent(MechArmEvent):
-    error_code: int
-
-@dataclasses.dataclass(kw_only=True)
-class BroadcastEvent(MechArmEvent):
+class MechArmErrorInfo(MechArmEvent):
     pass
+
+
+class MechArmError(Exception):
+    def __init__(self, error_code: MechArmErrorCode, message: str):
+        self.error_code = error_code
+        self.message = message
+        super().__init__(f"{type(self).__name__} ({self.error_code}): {self.message}")
+
+    @abstractmethod
+    def as_event(self) -> MechArmEvent:
+        raise NotImplementedError()
+
 
 @dataclasses.dataclass(kw_only=True)
 class SessionEvent(MechArmEvent):
     session: MechArmSessionInfo
 
-TAction = TypeVar('TAction', bound=MechArmAction)
+
+TAction = TypeVar("TAction", bound=MechArmAction)
+
 
 @dataclasses.dataclass(kw_only=True)
 class ActionEvent(MechArmEvent, Generic[TAction]):
     action: TAction
 
-@dataclasses.dataclass(kw_only=True)
-class ActionError(ActionEvent[TAction], ErrorEvent, Generic[TAction]):
-    pass
 
 @dataclasses.dataclass(kw_only=True)
-class ActionResponse(ActionEvent[TAction], ErrorEvent, Generic[TAction]):
+class ActionErrorInfo(ActionEvent[TAction], MechArmErrorInfo, Generic[TAction]):
     pass
 
+
+class MechArmActionError(MechArmError):
+    def __init__(
+        self, error_code: MechArmErrorCode, action: MechArmAction, message: str
+    ):
+        super().__init__(error_code, message)
+        self.action = action
+
+
 @dataclasses.dataclass(kw_only=True)
-class ActionProgress(ActionEvent, ErrorEvent, Generic[TAction]):
+class ActionResponse(ActionEvent[TAction], Generic[TAction]):
+    pass
+
+
+@dataclasses.dataclass(kw_only=True)
+class ActionProgress(ActionEvent, Generic[TAction]):
     progress_id: int
