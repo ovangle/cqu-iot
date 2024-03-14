@@ -24,7 +24,10 @@ class MechArmSessionInfo(MechArmInfo):
 class MechArmErrorCode(IntEnum):
     BAD_ACTION = 300
     SESSION_BUSY = 400
+    NO_CURRENT_SESSION = 401
+    SESSION_TIMEOUT = 402
     MOVE_ERROR = 500
+    
 
 
 _NEXT_ACTION_ID = 0
@@ -156,7 +159,9 @@ def event_to_json_object(evt: MechArmEvent) -> dict[str, Any]:
 
 @dataclasses.dataclass(kw_only=True)
 class MechArmErrorInfo(MechArmEvent):
-    pass
+    @abstractmethod
+    def as_error(self) -> MechArmError:
+        raise NotImplementedError
 
 
 class MechArmError(Exception):
@@ -186,11 +191,12 @@ class ActionEvent(MechArmEvent, Generic[TAction]):
 @dataclasses.dataclass(kw_only=True)
 class ActionErrorInfo(ActionEvent[TAction], MechArmErrorInfo, Generic[TAction]):
     pass
+  
 
 
-class MechArmActionError(MechArmError):
+class MechArmActionError(MechArmError, Generic[TAction]):
     def __init__(
-        self, error_code: MechArmErrorCode, action: MechArmAction, message: str
+        self, error_code: MechArmErrorCode, action: TAction, message: str
     ):
         super().__init__(error_code, message)
         self.action = action

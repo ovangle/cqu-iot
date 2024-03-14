@@ -22,34 +22,37 @@ from typing import (
     TypeVar,
     cast,
 )
-from mech_arm_mqtt.schema.core import (
-    ActionErrorInfo,
-    ActionEvent,
-    MechArmSessionInfo,
-    SessionAction,
-)
 from pymycobot import MyCobot  # type: ignore
 
-from .schema.actions import BeginSession, MechArmAction, MoveAction
-from .schema.events import (
-    ActionResponse,
+from .core import (
+    ActionErrorInfo, 
+    ActionResponse, 
+    MechArmSessionInfo, 
+    SessionAction,
+    MechArmAction, 
     MechArmEvent,
+    ActionProgress,
+)
+
+from .actions import BeginSession, MoveAction
+from .events import (
     MoveComplete,
     MoveProgress,
-    ActionProgress,
     SessionCreated,
     SessionDestroyed,
     SessionReady,
 )
-from .schema.session import MechArmSession, MechArm
 
 TAction = TypeVar("TAction", bound=MechArmAction)
 
 ProgressCallback = Callable[[ActionProgress[TAction]], None]
 
-
 class MyCobotTask(Generic[TAction]):
-    def __init__(self, context: MyCobotTaskContext[TAction], action: TAction):
+    def __init__(
+        self, 
+        context: MyCobotTaskContext[TAction],
+        action: TAction
+    ):
         self.context = context
         self.action = action
 
@@ -59,7 +62,7 @@ class MyCobotTask(Generic[TAction]):
 
     @property
     def session_info(self) -> MechArmSessionInfo:
-        return self.context.session.info
+        return self.context.session_info
 
     @abstractmethod
     def __call__(self) -> ActionResponse[TAction]:
@@ -72,58 +75,59 @@ class MyCobotTask(Generic[TAction]):
 
 class MyCobotTaskContext(AsyncContextManager, Generic[TAction]):
 
-    def __init__(self, _session: AsyncMyCobot, _task_type: type[MyCobotTask[TAction]]):
-        self._session = _session
-        self._task_type = _task_type
+    def __init__(
+        self, 
+        session: AsyncMyCobot,
+        on_progress: Callable[[ActionProgress[TAction]], None] | None = None
+    ):
+        self.session = session
 
-        self._executor = _session._executor
-        self._loop = _session._loop
+        self._executor = session._executor
+        self._loop = asyncio.get_running_loop()
 
-        self._event_queue = asyncio.Queue[ActionEvent[TAction]]()
+        self._progress_queue = asyncio.Queue[ActionProgress[TAction]]()
+        self.on_progress = on_progress
 
-    async def events(self) -> AsyncIterator[ActionEvent[TAction]]:
-        while not self._closed:
-            yield await self._event_queue.get()
+        self._completed = False
+        self._exc_type: type[BaseException] | None = None
+        self._exc_value: BaseException | None = None
+        self._exc_tb: TracebackType | None = None
+
+    async def progress(self) -> AsyncIterator[ActionProgress[TAction]]:
+        while not self._completed:
+            if not self._progress_queue.empty():
+                yield await self._progress_queue.get()
 
     @property
     def bot(self):
-        return MyCobot(self._session.mecharm_port)
+        return MyCobot(self.session.mecharm_port)
+
+    @property
+    def session_info(self):
+        return self.session.session_info
 
     async def __aenter__(self) -> MyCobotTaskContext[TAction]:
-        if self._closed:
-            raise ValueError("Already closed")
         return self
 
     async def __aexit__(
         self,
         __exc_type: type[BaseException] | None = None,
         __exc_value: BaseException | None = None,
-        __traceback: TracebackType | None = None,
+        __exc_tb: TracebackType | None = None,
     ) -> bool | None:
-        self._closed = True
-        return await super().__aexit__(__exc_type, __exc_value, __traceback)
+        self._completed = True
+        self._exc_type = __exc_type
+        self._exc_value = __exc_value
+        self._exc_tb = __exc_tb
+        return None
 
     async def run(self, action: TAction):
-        if self._closed:
-            raise RuntimeError("Already closed")
-        task = self._task_type(self, action)
-        response = await self._loop.run_in_executor(self._executor, task, action)
-        await self._event_queue.put(response)
+        task = self.session.task_factory(self, action)
+        return await self._loop.run_in_executor(self._executor, task, action)
 
-    def add_progress_notification(self, progress: ActionProgress[TAction]):
-        assert self._event_queue
-        self._loop.call_soon_threadsafe(self._event_queue.put, progress)
-
-    @property
-    async def notifications(self) -> AsyncIterator[ActionEvent[TAction]]:
-        assert self._event_queue
-        while not self._closed:
-            yield await self._event_queue.get()
-            await asyncio.sleep(1)
-
-        # async for item in self._notification_queue:
-        #    if not self._closed:
-        #        yield item
+    def add_progress(self, progress: ActionProgress[TAction]):
+        assert self._progress_queue
+        self._loop.call_soon_threadsafe(self._progress_queue.put, progress)
 
 
 class MoveTask(MyCobotTask[MoveAction]):
@@ -133,16 +137,14 @@ class MoveTask(MyCobotTask[MoveAction]):
 
     def emit_progress(self):
         coords = self.bot.get_coords()
-        self.context.add_progress_notification(
-            MoveProgress(
-                name="move_progress",
-                action=self.action,
-                session=self.session_info,
-                progress_id=self.progress_id,
-                current_coords=coords,
-                dest_coords=self.action.to_coords,
-            )
-        )
+        self.context.add_progress(MoveProgress(
+            name="move_progress",
+            action=self.action,
+            session=self.session_info,
+            progress_id=self.progress_id,
+            current_coords=coords,
+            dest_coords=self.action.to_coords
+        ))
         self.progress_id += 1
 
     def __call__(self):
@@ -154,23 +156,24 @@ class MoveTask(MyCobotTask[MoveAction]):
             time.sleep(5)
 
         return MoveComplete(
-            action=self.action,
+            name="move_complete",
+            error_code=None,
+            action=self.action, 
             session=self.session_info,
-            coords=self.action.to_coords,
+            coords=self.action.to_coords
         )
 
 
-class AsyncMyCobot(MechArmSession):
+class AsyncMyCobot:
     def __init__(
         self, session_id: int, _begin_session: BeginSession, mecharm_port: int
     ):
         self.session_id = session_id
         self._begin_session = _begin_session
         self.mecharm_port = mecharm_port
+        self._loop = asyncio.get_running_loop()
 
         self._closed = False
-
-        self._loop = asyncio.get_running_loop()
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._action_queue = asyncio.Queue[SessionAction]()
         self._event_queue: asyncio.Queue[MechArmEvent] = asyncio.Queue()
@@ -183,44 +186,38 @@ class AsyncMyCobot(MechArmSession):
     def remote_client_id(self):
         return self._begin_session.remote_client_id
 
-    async def on_action(self, action: TAction):
-        async with MyCobotTaskContext[TAction](self) as context:
+    @property
+    def session_info(self):
+        return MechArmSessionInfo(
+            id=self.session_id,
+            client_id=self.client_id,
+            remote_client_id=self.remote_client_id
+        )
 
-            async def relay_notifications():
-                for notification in context.notifications:
-                    self._event_queue.put(notification)
+    def task_factory(self, context: MyCobotTaskContext, action: TAction) -> MyCobotTask[TAction]:
+        match action:
+            case MoveAction():
+                return cast(MyCobotTask[TAction], MoveTask(context, action))
+            case _:
+                raise ValueError(f"Unhandled task: {action.name}")
 
-            loop = asyncio.get_running_loop()
-            loop.call_soon(relay_notifications())
+    async def move(
+        self, 
+        action: MoveAction, 
+        on_progress: Callable[[MoveProgress], None] | None= None,
+    ) -> MoveComplete:
+        async with MyCobotTaskContext[MoveAction](self) as context:
+            if on_progress:
+                async def call_on_progress():
+                    async for progress in context.progress_events:
+                        on_progress(progress)
+                self._loop.call_soon(call_on_progress)
+
             return await context.run(action)
-
-    async def run(self):
-        while not self._closed:
-            action = await self._action_queue.get()
-            await self._run_action(action)
-
-            if self._action_queue.empty():
-                await self._event_queue.put(
-                    SessionReady(name="session_ready", session=self.info)
-                )
-
-    async def events(self) -> AsyncIterator[MechArmEvent]:
-        if not self._event_queue:
-            raise ValueError("Session not initialized")
-        while self._event_queue:
-            yield await self._event_queue.get()
 
     async def __aenter__(self) -> AsyncMyCobot:
         self._executor = ThreadPoolExecutor(max_workers=1)
-        await self._event_queue.put(
-            SessionCreated(
-                name="session_created", action=self._begin_session, session=self.info
-            )
-        )
         return self
-
+    
     async def __aexit__(self, __exc_type, __exc_value, __exc_traceback) -> None:
         self._executor.shutdown()
-        await self._event_queue.put(
-            SessionDestroyed(name="session_destroyed", exit_code=4, session=self.info)
-        )

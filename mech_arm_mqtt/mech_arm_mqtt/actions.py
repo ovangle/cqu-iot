@@ -1,14 +1,10 @@
 from __future__ import annotations
-from asyncio import StreamReader, Task
-import dataclasses
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, Protocol
 
-from .model import MechArmAction, MechArmSessionInfo, SessionAction, mecharm_action, mecharm_event
+from .core import MechArmAction, MechArmSessionInfo, SessionAction, mecharm_action
 
 
 @mecharm_action("begin_session")
 class BeginSession(MechArmAction):
-    mecharm_client_id: str 
     remote_client_id: str
 
 
