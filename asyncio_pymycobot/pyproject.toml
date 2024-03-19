@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "asyncio-pymycobot"
+version = "0.1.0"
+description = "Asyncio wrapper for pymycobot library"
+authors = ["Thomas Stephenson <t.stephenson@cqu.edu.au>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+pymycobot = "^3.4.3"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

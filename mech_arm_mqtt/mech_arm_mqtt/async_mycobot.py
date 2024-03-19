@@ -143,13 +143,13 @@ class MoveTask(MyCobotTask[MoveAction]):
             session=self.session_info,
             progress_id=self.progress_id,
             current_coords=coords,
-            dest_coords=self.action.to_coords
+            dest_coords=self.action.to_joint_angles
         ))
         self.progress_id += 1
 
     def __call__(self):
         self.progress_id = 0
-        self.bot.send_coords(list(self.action.to_coords))
+        self.bot.send_coords(list(self.action.to_joint_angles))
 
         while self.bot.is_moving:
             self.emit_progress(self.action)
@@ -160,7 +160,7 @@ class MoveTask(MyCobotTask[MoveAction]):
             error_code=None,
             action=self.action, 
             session=self.session_info,
-            coords=self.action.to_coords
+            coords=self.action.to_joint_angles
         )
 
 
@@ -179,19 +179,11 @@ class AsyncMyCobot:
         self._event_queue: asyncio.Queue[MechArmEvent] = asyncio.Queue()
 
     @property
-    def client_id(self):
-        return self._begin_session.mecharm_client_id
-
-    @property
-    def remote_client_id(self):
-        return self._begin_session.remote_client_id
-
-    @property
     def session_info(self):
         return MechArmSessionInfo(
             id=self.session_id,
-            client_id=self.client_id,
-            remote_client_id=self.remote_client_id
+            client_id=self._begin_session.client_id,
+            remote_client_id=self._begin_session.remote_client_id
         )
 
     def task_factory(self, context: MyCobotTaskContext, action: TAction) -> MyCobotTask[TAction]:
@@ -209,7 +201,7 @@ class AsyncMyCobot:
         async with MyCobotTaskContext[MoveAction](self) as context:
             if on_progress:
                 async def call_on_progress():
-                    async for progress in context.progress_events:
+                    async for progress in context.progress:
                         on_progress(progress)
                 self._loop.call_soon(call_on_progress)
 

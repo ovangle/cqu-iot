@@ -68,6 +68,9 @@ class MechArmAction:
         self.is_error = bool(error_code)
         self.error_code = error_code
 
+    def validate(self):
+        return
+
 
 def action_from_json_object(json: dict[str, Any]):
     try:
